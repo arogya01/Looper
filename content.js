@@ -110,14 +110,10 @@
 
     const control = document.createElement('div');
     control.className = 'video-speed-control';
-    control.innerHTML = `
-      <span class="arrow"><</span>
-      <span class="speed">${video.playbackRate.toFixed(2)}x</span>
-      <span class="arrow">></span>
-    `;
+    control.innerHTML = `<span class="arrow left-arrow">&lt;</span><span class="speed">${video.playbackRate.toFixed(2)}x</span><span class="arrow right-arrow">&gt;</span>`;
 
-    const leftArrow = control.querySelector('.arrow:first-child');
-    const rightArrow = control.querySelector('.arrow:last-child');
+    const leftArrow = control.querySelector('.left-arrow');
+    const rightArrow = control.querySelector('.right-arrow');
     const speedDisplay = control.querySelector('.speed');
 
     leftArrow.addEventListener('click', (e) => {
