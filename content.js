@@ -20,6 +20,10 @@
     return `speed_${hostname}`;
   }
 
+  function getPositionKey(hostname) {
+    return `position_${hostname}`;
+  }
+
   function getClosestSpeed(currentSpeed) {
     return SPEEDS.reduce((prev, curr) => 
       Math.abs(curr - currentSpeed) < Math.abs(prev - currentSpeed) ? curr : prev
@@ -93,6 +97,42 @@
     }
   }
 
+  async function savePosition(control, position) {
+    if (!chrome.runtime?.id) {
+      console.warn('[Looper] Extension context invalid, skipping position save');
+      return;
+    }
+    
+    try {
+      const hostname = getHostname();
+      const key = getPositionKey(hostname);
+      await chrome.storage.local.set({ [key]: position });
+      console.log(`[Looper] Saved position for ${hostname}:`, position);
+    } catch (error) {
+      console.warn('[Looper] Failed to save position:', error);
+    }
+  }
+
+  async function loadPosition() {
+    if (!chrome.runtime?.id) {
+      console.warn('[Looper] Extension context invalid, skipping position load');
+      return null;
+    }
+    
+    try {
+      const hostname = getHostname();
+      const key = getPositionKey(hostname);
+      const result = await chrome.storage.local.get([key]);
+      if (result[key]) {
+        console.log(`[Looper] Loaded position for ${hostname}:`, result[key]);
+        return result[key];
+      }
+    } catch (error) {
+      console.warn('[Looper] Failed to load position:', error);
+    }
+    return null;
+  }
+
   function updateButton(video) {
     const control = videoControls.get(video);
     if (control) {
@@ -101,6 +141,91 @@
         speedDisplay.textContent = `${video.playbackRate.toFixed(2)}x`;
       }
     }
+  }
+
+  function setupDrag(control, video) {
+    let isDragging = false;
+    let dragStartX, dragStartY;
+    let startPosX, startPosY;
+    let dragPointerId = null;
+
+    control.addEventListener('pointerdown', (e) => {
+      if (e.target.classList.contains('arrow') || e.target.classList.contains('speed')) {
+        return;
+      }
+
+      isDragging = true;
+      dragPointerId = e.pointerId;
+      dragStartX = e.clientX;
+      dragStartY = e.clientY;
+      startPosX = parseInt(control.style.left) || 0;
+      startPosY = parseInt(control.style.top) || 0;
+
+      control.style.cursor = 'grabbing';
+      control.setPointerCapture(e.pointerId);
+
+      e.preventDefault();
+      e.stopPropagation();
+      e.stopImmediatePropagation();
+    }, { capture: true });
+
+    control.addEventListener('pointermove', (e) => {
+      if (!isDragging || e.pointerId !== dragPointerId) return;
+
+      const deltaX = e.clientX - dragStartX;
+      const deltaY = e.clientY - dragStartY;
+
+      const rect = video.getBoundingClientRect();
+      const controlRect = control.getBoundingClientRect();
+
+      let newX = startPosX + deltaX;
+      let newY = startPosY + deltaY;
+
+      const maxX = rect.width - controlRect.width;
+      const maxY = rect.height - controlRect.height;
+
+      newX = Math.max(0, Math.min(newX, maxX));
+      newY = Math.max(0, Math.min(newY, maxY));
+
+      control.style.left = `${newX}px`;
+      control.style.top = `${newY}px`;
+
+      e.preventDefault();
+      e.stopPropagation();
+    }, { capture: true });
+
+    control.addEventListener('pointerup', (e) => {
+      if (!isDragging || e.pointerId !== dragPointerId) return;
+
+      isDragging = false;
+      dragPointerId = null;
+      control.style.cursor = 'move';
+      control.releasePointerCapture(e.pointerId);
+
+      const position = {
+        x: parseInt(control.style.left),
+        y: parseInt(control.style.top)
+      };
+      savePosition(control, position);
+
+      e.preventDefault();
+      e.stopPropagation();
+      e.stopImmediatePropagation();
+    }, { capture: true });
+
+    control.addEventListener('pointercancel', (e) => {
+      if (!isDragging || e.pointerId !== dragPointerId) return;
+
+      isDragging = false;
+      dragPointerId = null;
+      control.style.cursor = 'move';
+
+      const position = {
+        x: parseInt(control.style.left),
+        y: parseInt(control.style.top)
+      };
+      savePosition(control, position);
+    }, { capture: true });
   }
 
   function createSpeedControl(video) {
@@ -131,7 +256,11 @@
       resetSpeed(video);
     });
 
-    positionControl(control, video);
+    loadPosition().then(position => {
+      positionControl(control, video, position);
+    });
+
+    setupDrag(control, video);
 
     video.addEventListener('click', () => {
       activeVideo = video;
@@ -168,10 +297,33 @@
     videoControls.set(video, control);
   }
 
-  function positionControl(control, video) {
+  function positionControl(control, video, position = null) {
     const rect = video.getBoundingClientRect();
     if (rect.width > 0 && rect.height > 0) {
       control.style.display = 'flex';
+      
+      const controlRect = control.getBoundingClientRect();
+      const parentRect = video.parentElement.getBoundingClientRect();
+      
+      let x, y;
+      
+      if (position) {
+        x = position.x;
+        y = position.y;
+      } else {
+        x = rect.width - controlRect.width - 10;
+        y = 10;
+      }
+      
+      const maxX = rect.width - controlRect.width;
+      const maxY = rect.height - controlRect.height;
+      
+      x = Math.max(0, Math.min(x, maxX));
+      y = Math.max(0, Math.min(y, maxY));
+      
+      control.style.left = `${x}px`;
+      control.style.top = `${y}px`;
+      control.style.right = 'auto';
     }
   }
 
@@ -181,7 +333,14 @@
       control.remove();
       videoControls.delete(video);
     }
+    const observer = videoObservers.get(video);
+    if (observer) {
+      observer.disconnect();
+      videoObservers.delete(video);
+    }
   }
+
+  const videoObservers = new WeakMap();
 
   function setupVideo(video) {
     if (videoControls.has(video)) {
@@ -189,14 +348,71 @@
     }
 
     video.playbackRate = getClosestSpeed(video.playbackRate);
-    
+
     loadSpeed(video).then(() => {
       createSpeedControl(video);
     });
+
+    if (!videoObservers.has(video)) {
+      const resizeObserver = new ResizeObserver(() => {
+        const control = videoControls.get(video);
+        if (control) {
+          loadPosition().then(position => {
+            positionControl(control, video, position);
+          });
+        }
+      });
+      resizeObserver.observe(video);
+      videoObservers.set(video, resizeObserver);
+    }
+  }
+
+  function getAllVideos(root = document) {
+    const videos = [];
+    try {
+      videos.push(...root.getElementsByTagName('video'));
+    } catch (e) {
+      // root might not support getElementsByTagName
+    }
+
+    // Search inside shadow DOMs
+    const allElements = root.querySelectorAll ? root.querySelectorAll('*') : [];
+    for (const el of allElements) {
+      if (el.shadowRoot) {
+        videos.push(...getAllVideos(el.shadowRoot));
+      }
+    }
+
+    return videos;
+  }
+
+  function getAllIframes() {
+    const iframes = [];
+    try {
+      const frames = document.querySelectorAll('iframe');
+      for (const frame of frames) {
+        try {
+          if (frame.contentDocument) {
+            iframes.push(frame.contentDocument);
+          }
+        } catch (e) {
+          // Cross-origin iframe, can't access
+        }
+      }
+    } catch (e) {
+      // ignore
+    }
+    return iframes;
   }
 
   function scanForVideos() {
-    const videos = document.getElementsByTagName('video');
+    const videos = getAllVideos();
+
+    // Also scan inside accessible iframes
+    for (const iframeDoc of getAllIframes()) {
+      videos.push(...getAllVideos(iframeDoc));
+    }
+
     const processedVideos = new Set(videoControls.keys());
     const currentVideos = new Set(videos);
 
@@ -207,17 +423,40 @@
     }
 
     for (const video of processedVideos) {
-      if (!currentVideos.has(video)) {
+      if (!currentVideos.has(video) || !document.contains(video)) {
         removeSpeedControl(video);
       }
     }
   }
 
-  const observer = new MutationObserver(() => {
-    scanForVideos();
+  let scanTimeout = null;
+  const observer = new MutationObserver((mutations) => {
+    // Debounce scans to avoid performance issues on rapid DOM changes
+    if (scanTimeout) clearTimeout(scanTimeout);
+    scanTimeout = setTimeout(() => {
+      scanForVideos();
+    }, 100);
+
+    // Watch for shadow roots being attached
+    for (const mutation of mutations) {
+      for (const node of mutation.addedNodes) {
+        if (node.nodeType === Node.ELEMENT_NODE) {
+          if (node.shadowRoot) {
+            scanForVideos();
+          }
+          const shadowHosts = node.querySelectorAll ? node.querySelectorAll('*') : [];
+          for (const el of shadowHosts) {
+            if (el.shadowRoot) {
+              scanForVideos();
+              break;
+            }
+          }
+        }
+      }
+    }
   });
 
-  observer.observe(document.body, {
+  observer.observe(document.documentElement, {
     childList: true,
     subtree: true
   });
