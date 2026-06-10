@@ -1,11 +1,12 @@
 .video-speed-control {
-  position: absolute;
+  position: fixed;
   background: rgba(0, 0, 0, 0.7);
   color: white;
   border-radius: 20px;
   padding: 6px 12px;
   font-size: 14px;
-  font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, sans-serif;
+  font-family:
+    -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, sans-serif;
   z-index: 2147483647 !important;
   cursor: move;
   user-select: none;

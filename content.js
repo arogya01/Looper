@@ -11,6 +11,8 @@
 
   const videoControls = new Map();
   let activeVideo = null;
+  let cachedPosition = null;
+  let rafUpdateId = null;
 
   function getHostname() {
     return window.location.hostname;
@@ -97,12 +99,13 @@
     }
   }
 
-  async function savePosition(control, position) {
+  async function savePosition(position) {
+    cachedPosition = position;
     if (!chrome.runtime?.id) {
       console.warn('[Looper] Extension context invalid, skipping position save');
       return;
     }
-    
+
     try {
       const hostname = getHostname();
       const key = getPositionKey(hostname);
@@ -114,16 +117,20 @@
   }
 
   async function loadPosition() {
+    if (cachedPosition !== null) {
+      return cachedPosition;
+    }
     if (!chrome.runtime?.id) {
       console.warn('[Looper] Extension context invalid, skipping position load');
       return null;
     }
-    
+
     try {
       const hostname = getHostname();
       const key = getPositionKey(hostname);
       const result = await chrome.storage.local.get([key]);
       if (result[key]) {
+        cachedPosition = result[key];
         console.log(`[Looper] Loaded position for ${hostname}:`, result[key]);
         return result[key];
       }
@@ -146,7 +153,7 @@
   function setupDrag(control, video) {
     let isDragging = false;
     let dragStartX, dragStartY;
-    let startPosX, startPosY;
+    let startFixedX, startFixedY;
     let dragPointerId = null;
 
     control.addEventListener('pointerdown', (e) => {
@@ -158,8 +165,9 @@
       dragPointerId = e.pointerId;
       dragStartX = e.clientX;
       dragStartY = e.clientY;
-      startPosX = parseInt(control.style.left) || 0;
-      startPosY = parseInt(control.style.top) || 0;
+      startFixedX = parseInt(control.style.left) || 0;
+      startFixedY = parseInt(control.style.top) || 0;
+      control.dataset.dragging = 'true';
 
       control.style.cursor = 'grabbing';
       control.setPointerCapture(e.pointerId);
@@ -178,17 +186,19 @@
       const rect = video.getBoundingClientRect();
       const controlRect = control.getBoundingClientRect();
 
-      let newX = startPosX + deltaX;
-      let newY = startPosY + deltaY;
+      let newFixedX = startFixedX + deltaX;
+      let newFixedY = startFixedY + deltaY;
 
-      const maxX = rect.width - controlRect.width;
-      const maxY = rect.height - controlRect.height;
+      const minX = rect.left;
+      const minY = rect.top;
+      const maxX = rect.right - controlRect.width;
+      const maxY = rect.bottom - controlRect.height;
 
-      newX = Math.max(0, Math.min(newX, maxX));
-      newY = Math.max(0, Math.min(newY, maxY));
+      newFixedX = Math.max(minX, Math.min(newFixedX, maxX));
+      newFixedY = Math.max(minY, Math.min(newFixedY, maxY));
 
-      control.style.left = `${newX}px`;
-      control.style.top = `${newY}px`;
+      control.style.left = `${newFixedX}px`;
+      control.style.top = `${newFixedY}px`;
 
       e.preventDefault();
       e.stopPropagation();
@@ -200,13 +210,15 @@
       isDragging = false;
       dragPointerId = null;
       control.style.cursor = 'move';
+      delete control.dataset.dragging;
       control.releasePointerCapture(e.pointerId);
 
+      const rect = video.getBoundingClientRect();
       const position = {
-        x: parseInt(control.style.left),
-        y: parseInt(control.style.top)
+        x: parseInt(control.style.left) - rect.left,
+        y: parseInt(control.style.top) - rect.top
       };
-      savePosition(control, position);
+      savePosition(position);
 
       e.preventDefault();
       e.stopPropagation();
@@ -219,12 +231,14 @@
       isDragging = false;
       dragPointerId = null;
       control.style.cursor = 'move';
+      delete control.dataset.dragging;
 
+      const rect = video.getBoundingClientRect();
       const position = {
-        x: parseInt(control.style.left),
-        y: parseInt(control.style.top)
+        x: parseInt(control.style.left) - rect.left,
+        y: parseInt(control.style.top) - rect.top
       };
-      savePosition(control, position);
+      savePosition(position);
     }, { capture: true });
   }
 
@@ -243,18 +257,24 @@
 
     leftArrow.addEventListener('click', (e) => {
       e.stopPropagation();
+      e.preventDefault();
       decreaseSpeed(video);
     });
 
     rightArrow.addEventListener('click', (e) => {
       e.stopPropagation();
+      e.preventDefault();
       increaseSpeed(video);
     });
 
     speedDisplay.addEventListener('click', (e) => {
       e.stopPropagation();
+      e.preventDefault();
       resetSpeed(video);
     });
+
+    // Append to body first so we can measure it, then position it
+    document.body.appendChild(control);
 
     loadPosition().then(position => {
       positionControl(control, video, position);
@@ -262,16 +282,12 @@
 
     setupDrag(control, video);
 
-    video.addEventListener('click', () => {
-      activeVideo = video;
-    });
-
-    video.addEventListener('mouseenter', () => {
+    control.addEventListener('mouseenter', () => {
       activeVideo = video;
       control.style.opacity = '1';
     });
 
-    video.addEventListener('mouseleave', () => {
+    control.addEventListener('mouseleave', () => {
       setTimeout(() => {
         if (activeVideo !== video) {
           control.style.opacity = '0.7';
@@ -279,50 +295,38 @@
       }, 3000);
     });
 
-    control.addEventListener('mouseenter', () => {
-      activeVideo = video;
-    });
-
-    let parentElement = video.parentElement;
-    if (parentElement && parentElement.style.position !== 'relative' && 
-        parentElement.style.position !== 'absolute' &&
-        parentElement.style.position !== 'fixed') {
-      parentElement.style.position = 'relative';
-    }
-
-    if (parentElement) {
-      parentElement.appendChild(control);
-    }
-
     videoControls.set(video, control);
   }
 
   function positionControl(control, video, position = null) {
+    if (control.dataset.dragging === 'true') return;
+
     const rect = video.getBoundingClientRect();
     if (rect.width > 0 && rect.height > 0) {
       control.style.display = 'flex';
-      
+
       const controlRect = control.getBoundingClientRect();
-      const parentRect = video.parentElement.getBoundingClientRect();
-      
-      let x, y;
-      
+
+      let fixedX, fixedY;
+
       if (position) {
-        x = position.x;
-        y = position.y;
+        fixedX = rect.left + position.x;
+        fixedY = rect.top + position.y;
       } else {
-        x = rect.width - controlRect.width - 10;
-        y = 10;
+        fixedX = rect.right - controlRect.width - 10;
+        fixedY = rect.top + 10;
       }
-      
-      const maxX = rect.width - controlRect.width;
-      const maxY = rect.height - controlRect.height;
-      
-      x = Math.max(0, Math.min(x, maxX));
-      y = Math.max(0, Math.min(y, maxY));
-      
-      control.style.left = `${x}px`;
-      control.style.top = `${y}px`;
+
+      const minX = rect.left;
+      const minY = rect.top;
+      const maxX = rect.right - controlRect.width;
+      const maxY = rect.bottom - controlRect.height;
+
+      fixedX = Math.max(minX, Math.min(fixedX, maxX));
+      fixedY = Math.max(minY, Math.min(fixedY, maxY));
+
+      control.style.left = `${fixedX}px`;
+      control.style.top = `${fixedY}px`;
       control.style.right = 'auto';
     }
   }
@@ -338,6 +342,11 @@
       observer.disconnect();
       videoObservers.delete(video);
     }
+    try {
+      videoIntersectionObserver.unobserve(video);
+    } catch (e) {
+      // ignore
+    }
   }
 
   const videoObservers = new WeakMap();
@@ -347,10 +356,15 @@
       return;
     }
 
+    videoIntersectionObserver.observe(video);
+
     video.playbackRate = getClosestSpeed(video.playbackRate);
 
     loadSpeed(video).then(() => {
       createSpeedControl(video);
+      if (!rafUpdateId) {
+        startPositionUpdates();
+      }
     });
 
     if (!videoObservers.has(video)) {
@@ -404,6 +418,46 @@
     }
     return iframes;
   }
+
+  function updateAllControlPositions() {
+    for (const [video, control] of videoControls) {
+      if (document.contains(video)) {
+        positionControl(control, video, cachedPosition);
+      }
+    }
+  }
+
+  function startPositionUpdates() {
+    if (rafUpdateId) return;
+    function tick() {
+      if (videoControls.size === 0) {
+        stopPositionUpdates();
+        return;
+      }
+      updateAllControlPositions();
+      rafUpdateId = requestAnimationFrame(tick);
+    }
+    rafUpdateId = requestAnimationFrame(tick);
+  }
+
+  function stopPositionUpdates() {
+    if (rafUpdateId) {
+      cancelAnimationFrame(rafUpdateId);
+      rafUpdateId = null;
+    }
+  }
+
+  // Track which video is visible for keyboard shortcuts
+  const videoIntersectionObserver = new IntersectionObserver((entries) => {
+    for (const entry of entries) {
+      if (entry.isIntersecting) {
+        activeVideo = entry.target;
+      }
+    }
+  }, { threshold: 0.5 });
+
+  window.addEventListener('scroll', updateAllControlPositions, { passive: true });
+  window.addEventListener('resize', updateAllControlPositions, { passive: true });
 
   function scanForVideos() {
     const videos = getAllVideos();
@@ -468,9 +522,13 @@
 
     let video = activeVideo;
     if (!video) {
-      const videos = document.getElementsByTagName('video');
-      if (videos.length > 0) {
-        video = videos[0];
+      const videos = getAllVideos();
+      for (const v of videos) {
+        const rect = v.getBoundingClientRect();
+        if (rect.width > 0 && rect.height > 0 && rect.top < window.innerHeight && rect.bottom > 0) {
+          video = v;
+          break;
+        }
       }
     }
 
